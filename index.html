@@ -557,6 +557,9 @@ const Config = {
     favs.has(key) ? favs.delete(key) : favs.add(key);
     this.favorites = favs;
   },
+
+  get demo()  { return localStorage.getItem('rv_demo') === 'true'; },
+  set demo(v) { v ? localStorage.setItem('rv_demo', 'true') : localStorage.removeItem('rv_demo'); },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -714,7 +717,148 @@ async function detectEnvironments(owner, repo, workflowId) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Fetch current status per environment
 // ─────────────────────────────────────────────────────────────────────────────
+// Demo / sample data — no GitHub API
+// ─────────────────────────────────────────────────────────────────────────────
+const DEMO_ENVS = ['utv', 'staging', 'preprod', 'prod'];
+
+function buildDemoRepos() {
+  const names = [
+    ['acme', 'payments-api'],
+    ['acme', 'web-frontend'],
+    ['acme', 'auth-service'],
+    ['acme', 'notification-worker'],
+    ['acme', 'billing-gateway'],
+    ['acme', 'search-svc'],
+  ];
+  const refs = ['main', 'release/2.4.0', 'main', 'hotfix/login', 'main', 'release/1.9.2'];
+  const users = ['alice', 'bob', 'carol', 'dave'];
+  const hex = () => Math.floor(Math.random() * 16).toString(16);
+  const sha = () => Array.from({ length: 7 }, hex).join('');
+
+  return names.map(([owner, repo], i) => {
+    const statuses = {};
+    DEMO_ENVS.forEach((env, idx) => {
+      // Mix: earlier envs fail more, prod mostly green. Guarantee a spread.
+      const seed = (i * 4 + idx);
+      const status = (seed % 3 === 1) ? 'failure' : 'success';
+      const minsAgo = (seed * 37) % 4000 + 5;
+      statuses[env] = {
+        env,
+        status,
+        sha: sha(),
+        ref: refs[i % refs.length],
+        creator: users[(i + idx) % users.length],
+        createdAt: new Date(Date.now() - minsAgo * 60000).toISOString(),
+        runUrl: '',
+        runId: String(1000 + seed),
+      };
+    });
+    return {
+      owner, repo,
+      workflowId: 'deploy.yml',
+      workflowName: 'Deploy',
+      envType: 'github_environments',
+      environments: [...DEMO_ENVS],
+      demo: true,
+      _statuses: statuses,
+      _ts: Date.now() - (i * 3600000),
+    };
+  });
+}
+
+function loadDemoData() {
+  Config.demo  = true;
+  Config.repos = buildDemoRepos();
+  Config.user  = { login: 'demo-user', avatar_url: '' };
+  State.view = 'dashboard';
+  State.detailRepo = null;
+  render();
+}
+
+function makeDemoRepo(owner, repo) {
+  const hex = () => Math.floor(Math.random() * 16).toString(16);
+  const sha = () => Array.from({ length: 7 }, hex).join('');
+  const users = ['alice', 'bob', 'carol', 'dave'];
+  const statuses = {};
+  DEMO_ENVS.forEach((env, idx) => {
+    const status = Math.random() < (0.55 + idx * 0.08) ? 'success' : 'failure';
+    statuses[env] = {
+      env, status,
+      sha: sha(),
+      ref: idx === 0 ? 'main' : 'release/' + (1 + Math.floor(Math.random() * 3)) + '.' + Math.floor(Math.random() * 10),
+      creator: users[Math.floor(Math.random() * users.length)],
+      createdAt: new Date(Date.now() - Math.floor(Math.random() * 4000 + 5) * 60000).toISOString(),
+      runUrl: '',
+      runId: String(1000 + Math.floor(Math.random() * 9000)),
+    };
+  });
+  return {
+    owner, repo,
+    workflowId: 'deploy.yml',
+    workflowName: 'Deploy',
+    envType: 'github_environments',
+    environments: [...DEMO_ENVS],
+    demo: true,
+    _statuses: statuses,
+    _ts: Date.now() - Math.floor(Math.random() * 86400000),
+  };
+}
+
+function renderDemoRuns(rc, runsList) {
+  const hex = () => Math.floor(Math.random() * 16).toString(16);
+  const sha = () => Array.from({ length: 7 }, hex).join('');
+  const users = ['alice', 'bob', 'carol', 'dave'];
+  const titles = ['Fix login redirect', 'Bump dependencies', 'Add retry logic',
+    'Update config', 'Refactor handler', 'Hotfix null check', 'Release prep', 'Tune timeouts'];
+
+  const table = document.createElement('table');
+  table.className = 'runs-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th>Run</th><th>Branch</th><th>Commit</th><th>Status</th>
+      <th>Environments</th><th>Actor</th><th>Time</th>
+    </tr></thead>
+  `;
+  const tbody = document.createElement('tbody');
+
+  for (let i = 0; i < 8; i++) {
+    const conclusion = Math.random() < 0.7 ? 'success' : 'failure';
+    const sc = statusCls(conclusion);
+    const branch = i === 0 ? 'main' : (Math.random() < 0.5 ? 'main' : 'release/2.' + (8 - i));
+    const envBadges = rc.environments.map(envName => {
+      if (Math.random() < 0.35) return '';
+      const jsc = statusClsFor(conclusion, envName);
+      return `<span class="badge badge-${jsc}" style="font-size:11px;margin-right:3px"><span class="status-dot dot-${jsc}"></span>${esc(envName)}</span>`;
+    }).filter(Boolean).join('');
+    const createdAt = new Date(Date.now() - (i * 7 + Math.random() * 5) * 3600000).toISOString();
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>
+        <span style="font-family:monospace;font-size:12px">#${120 - i}</span>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${esc(titles[i % titles.length])}</div>
+      </td>
+      <td><code style="font-size:12px;background:rgba(110,118,129,0.2);padding:1px 5px;border-radius:3px">${esc(branch)}</code></td>
+      <td><code style="font-size:12px">${esc(sha())}</code></td>
+      <td><span class="badge badge-${sc}"><span class="status-dot dot-${sc}"></span>${statusLabel(conclusion)}</span></td>
+      <td style="max-width:260px">${envBadges || '<span style="color:var(--neutral);font-size:12px">—</span>'}</td>
+      <td style="font-size:13px;color:var(--text-muted)">${esc(users[Math.floor(Math.random() * users.length)])}</td>
+      <td style="font-size:12px;color:var(--text-muted)" title="${esc(createdAt)}">${timeAgo(createdAt)}</td>
+    `;
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  runsList.innerHTML = '';
+  runsList.append(table);
+}
+
+function statusClsFor(runConclusion, envName) {
+  return Math.random() < 0.75 ? statusCls(runConclusion) : statusCls(runConclusion === 'success' ? 'failure' : 'success');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 async function fetchEnvStatuses(rc) {
+  if (rc.demo) return rc._statuses;
   const { owner, repo, workflowId, envType, environments } = rc;
   const result = {};
 
@@ -797,7 +941,7 @@ const $app = document.getElementById('app');
 
 function render() {
   $app.innerHTML = '';
-  if (!Config.token) {
+  if (!Config.token && !Config.demo) {
     $app.append(renderAuth());
     return;
   }
@@ -837,6 +981,7 @@ function renderAuth() {
       </div>
 
       <button class="btn btn-primary" id="login-btn" style="width:100%;justify-content:center">Connect to GitHub</button>
+      <button class="btn" id="demo-btn" style="width:100%;justify-content:center;margin-top:8px">Try demo with sample data</button>
     </div>
   `;
 
@@ -876,6 +1021,7 @@ function renderAuth() {
   }
 
   btn.addEventListener('click', doLogin);
+  wrap.querySelector('#demo-btn').addEventListener('click', loadDemoData);
   input.addEventListener('keydown', e => e.key === 'Enter' && doLogin());
   gheInput.addEventListener('keydown', e => e.key === 'Enter' && doLogin());
   return wrap;
@@ -942,6 +1088,7 @@ function renderHeader() {
 
   h.querySelector('#signout-btn').addEventListener('click', () => {
     if (!confirm('Sign out?')) return;
+    if (Config.demo) { Config.demo = false; Config.repos = []; }
     Config.token = '';
     Config.user  = null;
     render();
@@ -951,6 +1098,7 @@ function renderHeader() {
 }
 
 async function fetchLatestTs(rc) {
+  if (rc.demo) return rc._ts;
   const { owner, repo, workflowId, envType, environments } = rc;
   try {
     if (workflowId) {
@@ -1010,6 +1158,11 @@ function renderDashboard() {
     item.addEventListener('click', () => { dropdown.style.display = 'none'; open = false; onClick(); });
     return item;
   }
+
+  dropdown.append(makeMenuItem('Load sample data', `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>`, false, () => {
+    if (Config.repos.length && !Config.demo && !confirm('Replace current pipelines with demo sample data?')) return;
+    loadDemoData();
+  }));
 
   if (repos.length) {
     dropdown.append(makeMenuItem('Refresh all', `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>`, false, () => renderCards()));
@@ -1482,6 +1635,44 @@ function renderAddRepoModal() {
   modal.append(body);
   overlay.append(modal);
 
+  if (Config.demo) {
+    body.innerHTML = `
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
+        Demo mode — adds a sample repo with environments
+        <code>utv</code> <code>staging</code> <code>preprod</code> <code>prod</code> and randomized statuses.
+      </p>
+      <div class="form-group">
+        <label for="demo-owner">Owner</label>
+        <input type="text" id="demo-owner" value="acme" autocomplete="off" />
+      </div>
+      <div class="form-group">
+        <label for="demo-repo">Repository name</label>
+        <input type="text" id="demo-repo" placeholder="my-service" autocomplete="off" />
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button class="btn" id="demo-cancel" style="flex:1;justify-content:center">Cancel</button>
+        <button class="btn btn-primary" id="demo-add" style="flex:2;justify-content:center">Add repo</button>
+      </div>
+    `;
+    body.querySelector('#demo-cancel').addEventListener('click', closeModal);
+    const repoInput = body.querySelector('#demo-repo');
+    repoInput.focus();
+    function addDemo() {
+      const owner = body.querySelector('#demo-owner').value.trim() || 'acme';
+      const repo  = repoInput.value.trim();
+      if (!repo) { toast('Enter a repository name', true); return; }
+      if (Config.repos.some(r => r.owner === owner && r.repo === repo)) {
+        toast('Already tracked', true); return;
+      }
+      Config.repos = [...Config.repos, makeDemoRepo(owner, repo)];
+      closeModal();
+      toast(`Added ${owner}/${repo}`);
+    }
+    body.querySelector('#demo-add').addEventListener('click', addDemo);
+    repoInput.addEventListener('keydown', e => { if (e.key === 'Enter') addDemo(); });
+    return overlay;
+  }
+
   let allRepos = [];
 
   // ── Step 1: pick repo(s) ──
@@ -1952,6 +2143,8 @@ async function loadDetail(rc) {
   // Recent runs
   const runsList = document.getElementById('runs-list');
   if (!runsList) return;
+
+  if (rc.demo) { renderDemoRuns(rc, runsList); return; }
 
   if (!workflowId) {
     runsList.textContent = 'No workflow configured — tracking via GitHub Environments only.';
