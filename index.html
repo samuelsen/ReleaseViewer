@@ -1680,9 +1680,14 @@ function renderAddRepoModal() {
     const selected = new Set();
 
     body.innerHTML = `
-      <div class="search-wrap" style="margin-bottom:6px">
-        <svg class="search-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"/></svg>
-        <input type="text" id="repo-search" placeholder="Search repositories…" autocomplete="off" />
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div class="search-wrap" style="flex:1;margin-bottom:0">
+          <svg class="search-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"/></svg>
+          <input type="text" id="repo-search" placeholder="Search repositories…" autocomplete="off" />
+        </div>
+        <select id="org-filter" class="btn" style="flex-shrink:0;max-width:160px;cursor:pointer">
+          <option value="">All owners</option>
+        </select>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 2px;margin-bottom:4px">
         <button id="select-all-btn" style="background:none;border:none;cursor:pointer;font-size:12px;color:var(--accent);padding:0;font-family:inherit">Select all</button>
@@ -1699,6 +1704,7 @@ function renderAddRepoModal() {
     `;
 
     const searchInput   = body.querySelector('#repo-search');
+    const orgFilter     = body.querySelector('#org-filter');
     const listEl        = body.querySelector('#repo-list');
     const configureBtn  = body.querySelector('#configure-btn');
     const bulkAddBtn    = body.querySelector('#bulk-add-btn');
@@ -1706,6 +1712,15 @@ function renderAddRepoModal() {
     const visibleCount  = body.querySelector('#visible-count');
     let visibleRepos = [];
     let timer;
+
+    const ownerOf = r => (r.owner?.login) || r.full_name.split('/')[0];
+    function getFiltered() {
+      const q = searchInput.value.toLowerCase().trim();
+      const org = orgFilter.value;
+      return allRepos.filter(r =>
+        (!org || ownerOf(r) === org) &&
+        (!q || r.full_name.toLowerCase().includes(q)));
+    }
 
     body.querySelector('#cancel-s1').addEventListener('click', closeModal);
 
@@ -1723,8 +1738,7 @@ function renderAddRepoModal() {
       const allVisible = visibleRepos.every(r => selected.has(r.full_name));
       if (allVisible) visibleRepos.forEach(r => selected.delete(r.full_name));
       else            visibleRepos.forEach(r => selected.add(r.full_name));
-      const q = searchInput.value.toLowerCase();
-      renderList(q ? allRepos.filter(x => x.full_name.toLowerCase().includes(q)) : allRepos);
+      renderList(getFiltered());
       updateButtons();
     });
 
@@ -1758,8 +1772,7 @@ function renderAddRepoModal() {
         item.addEventListener('click', () => {
           if (selected.has(r.full_name)) selected.delete(r.full_name);
           else selected.add(r.full_name);
-          const q = searchInput.value.toLowerCase();
-          renderList(q ? allRepos.filter(x => x.full_name.toLowerCase().includes(q)) : allRepos);
+          renderList(getFiltered());
           updateButtons();
         });
         listEl.append(item);
@@ -1783,7 +1796,13 @@ function renderAddRepoModal() {
         }
 
         allRepos = userRepos;
-        renderList(allRepos);
+        const owners = [...new Set(allRepos.map(ownerOf))].sort((a, b) => a.localeCompare(b));
+        for (const o of owners) {
+          const opt = document.createElement('option');
+          opt.value = o; opt.textContent = o;
+          orgFilter.append(opt);
+        }
+        renderList(getFiltered());
       } catch (e) {
         listEl.innerHTML = `<div style="padding:16px;color:var(--danger);font-size:13px">${esc(e.message)}</div>`;
       }
@@ -1791,11 +1810,10 @@ function renderAddRepoModal() {
 
     searchInput.addEventListener('input', () => {
       clearTimeout(timer);
-      const q = searchInput.value.toLowerCase();
-      timer = setTimeout(() => {
-        renderList(q ? allRepos.filter(r => r.full_name.toLowerCase().includes(q)) : allRepos);
-      }, 180);
+      timer = setTimeout(() => renderList(getFiltered()), 180);
     });
+
+    orgFilter.addEventListener('change', () => renderList(getFiltered()));
 
     configureBtn.addEventListener('click', () => {
       const name = [...selected][0];
@@ -2204,7 +2222,9 @@ async function loadDetail(rc) {
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${esc(trunc(run.display_title || run.name || '', 42))}</div>
         </td>
         <td><code style="font-size:12px;background:rgba(110,118,129,0.2);padding:1px 5px;border-radius:3px">${esc(run.head_branch || '')}</code></td>
-        <td><code style="font-size:12px">${esc((run.head_sha || '').slice(0, 7))}</code></td>
+        <td>${run.head_sha
+          ? `<a href="${esc(ghWebBase())}/${esc(owner)}/${esc(repo)}/commit/${esc(run.head_sha)}" target="_blank" style="font-family:monospace;font-size:12px">${esc(run.head_sha.slice(0, 7))}</a>`
+          : ''}</td>
         <td><span class="badge badge-${sc}"><span class="status-dot dot-${sc}"></span>${statusLabel(run.conclusion || run.status)}</span></td>
         <td style="max-width:260px">${envBadges || '<span style="color:var(--neutral);font-size:12px">—</span>'}</td>
         <td style="font-size:13px;color:var(--text-muted)">${esc(run.actor?.login || '')}</td>
