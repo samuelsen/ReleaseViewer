@@ -14,14 +14,7 @@ A single-file static web app for monitoring **GitHub Actions deployment statuses
 
 ## Quick start
 
-Open the app with any static file server:
-
-```bash
-python3 -m http.server 8080
-# then open http://localhost:8080
-```
-
-Or just open `index.html` directly in a browser.
+Open `index.html` directly in a browser, or serve it with any static file server.
 
 ### Connecting to GitHub
 
