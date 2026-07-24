@@ -2,6 +2,8 @@
 
 A single-file static web app for monitoring **GitHub Actions deployment statuses** across multiple repositories and environments. No build step, no dependencies, no backend — just open `index.html`.
 
+A static page is hosted, and can be used here: https://samuelsen.github.io/ReleaseViewer/
+
 ## Features
 
 - Track per-environment deployment status (e.g. `utv`, `staging`, `preprod`, `prod`) across many repos
