@@ -416,6 +416,21 @@
 
     .runs-table tr:last-child td { border-bottom: none; }
     .runs-table tbody tr:hover td { background: var(--surface2); }
+    .release-grid th, .release-grid td { white-space: nowrap; }
+    .stage-pill {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 2em;
+      font-size: 12px; font-weight: 500;
+      border: 1px dashed var(--border); color: var(--neutral);
+    }
+    .stage-pill.pill-prev {
+      border-style: solid; color: var(--text-muted);
+      background: rgba(110, 118, 129, 0.08);
+    }
+    .badge.is-current {
+      box-shadow: inset 0 0 0 1.5px var(--success);
+      font-weight: 600;
+    }
 
     /* ── Page layout ── */
     .page-header {
@@ -857,6 +872,190 @@ function statusClsFor(runConclusion, envName) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Release pipeline grid (Azure-classic style): rows = releases, cols = stages
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadReleaseGrid(rc, container) {
+  if (rc.demo) return renderDemoReleaseGrid(rc, container);
+  try {
+    const rows = rc.envType === 'job_names'
+      ? await buildJobRows(rc)
+      : await buildEnvDeploymentRows(rc);
+    renderReleaseGridTable(rc, rows, container);
+  } catch (e) {
+    container.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:8px">Failed to load: ${esc(e.message)}</div>`;
+  }
+}
+
+// github_environments: one row per release (grouped by sha), one cell per env.
+async function buildEnvDeploymentRows(rc) {
+  const { owner, repo, environments } = rc;
+  const byRelease = new Map();
+  await Promise.all(environments.map(async env => {
+    let deployments;
+    try { deployments = await GH.getDeployments(owner, repo, env); } catch { return; }
+    await Promise.all((deployments || []).map(async dep => {
+      let state = 'unknown', runUrl = '';
+      try {
+        const s = (await GH.getDeploymentStatuses(owner, repo, dep.id))[0];
+        state = s?.state || 'unknown';
+        runUrl = s?.target_url || dep.url || '';
+      } catch { /* leave unknown */ }
+      const sha7 = (dep.sha || '').slice(0, 7) || String(dep.id);
+      let row = byRelease.get(sha7);
+      if (!row) { row = { ref: dep.ref, sha7, createdAt: dep.created_at, runUrl, cells: {} }; byRelease.set(sha7, row); }
+      if ((dep.created_at || '') > (row.createdAt || '')) row.createdAt = dep.created_at;
+      if (!row.runUrl) row.runUrl = runUrl;
+      row.cells[env] = { state, runUrl };
+    }));
+  }));
+  const rows = [...byRelease.values()]
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    .slice(0, 8);
+  markReleaseKinds(rows, environments);
+  return rows;
+}
+
+// Per env: tag the live release 'current' and any other that was deployed there
+// 'prev' (superseded / rolled back). GitHub marks superseded deployments
+// 'inactive'; a rollback re-activates an older one, so the newer release that
+// was live before shows up as 'prev' here. Rows are newest-first.
+function markReleaseKinds(rows, environments) {
+  for (const env of environments) {
+    let currentSet = false;
+    for (const r of rows) {
+      const c = r.cells[env];
+      if (!c) continue;
+      const st = (c.state || '').toLowerCase();
+      if (st === 'success' && !currentSet) { c.kind = 'current'; currentSet = true; }
+      else if (st === 'success' || st === 'inactive') c.kind = 'prev';
+      else if (['failure', 'error', 'action_required'].includes(st)) c.kind = 'failure';
+      else if (['in_progress', 'queued', 'pending', 'waiting'].includes(st)) c.kind = st;
+      else c.kind = 'prev'; // deployed at some point, live-state unknown
+    }
+  }
+}
+
+// job_names fallback: one row per run, cell = job whose name matches the env.
+// ponytail: refetches runs+jobs that Recent Runs also loads; thread jobsMap
+// through loadDetail if the extra API calls ever bite.
+async function buildJobRows(rc) {
+  const { owner, repo, workflowId, environments } = rc;
+  if (!workflowId) return [];
+  const runs = (await GH.getWorkflowRuns(owner, repo, workflowId, { per_page: 10 })).workflow_runs || [];
+  const jobsMap = {};
+  await Promise.all(runs.map(async run => {
+    try { jobsMap[run.id] = (await GH.getRunJobs(owner, repo, run.id)).jobs || []; }
+    catch { jobsMap[run.id] = []; }
+  }));
+  const rows = runs.map(run => {
+    const cells = {};
+    const jobs = jobsMap[run.id] || [];
+    for (const env of environments) {
+      const job = jobs.find(j => j.name === env);
+      if (job) cells[env] = { state: job.conclusion || job.status, runUrl: run.html_url };
+    }
+    return {
+      ref: `${run.head_branch || ''} #${run.run_number}`.trim(),
+      sha7: (run.head_sha || '').slice(0, 7),
+      createdAt: run.created_at,
+      runUrl: run.html_url,
+      cells,
+    };
+  });
+  markReleaseKinds(rows, environments); // job runs carry no 'inactive'; newest success per env = current
+  return rows;
+}
+
+function renderDemoReleaseGrid(rc, container) {
+  const hex = () => Math.floor(Math.random() * 16).toString(16);
+  const sha = () => Array.from({ length: 7 }, hex).join('');
+  const envs = rc.environments;
+  const last = envs.length - 1;
+  const N = 8;
+  const rollbackEnv = last; // demo a rollback in the last stage (e.g. prod)
+  const rows = [];
+  for (let i = 0; i < N; i++) {
+    // Rows are newest-first; older releases (higher i) promoted further.
+    const furthest = Math.min(last, i + 1);
+    const cells = {};
+    envs.forEach((env, j) => {
+      if (j > furthest) return; // never reached → dashed ring
+      const newestReaching = Math.max(0, j - 1);
+      let state;
+      if (i === 0 && j === furthest) {
+        state = 'in_progress'; // newest release still deploying to its frontier stage
+      } else {
+        // Normally the newest release to reach a stage is live; on rollback an older one is.
+        const liveRow = j === rollbackEnv ? Math.min(N - 1, newestReaching + 1) : newestReaching;
+        state = i === liveRow ? 'success' : 'inactive'; // inactive = superseded / rolled-back-away
+      }
+      if (state === 'success' && i === 3 && j === 1) state = 'failure'; // one historical failed deploy
+      cells[env] = { state, runUrl: '' };
+    });
+    rows.push({
+      ref: `main-${673 - i * 3}`,
+      sha7: sha(),
+      createdAt: new Date(Date.now() - i * 22 * 3600000).toISOString(),
+      runUrl: '',
+      cells,
+    });
+  }
+  markReleaseKinds(rows, envs);
+  renderReleaseGridTable(rc, rows, container);
+}
+
+function renderReleaseGridTable(rc, rows, container) {
+  if (!rows.length) {
+    container.innerHTML = `<div style="color:var(--text-muted);font-size:13px;text-align:center;padding:16px">No releases found.</div>`;
+    return;
+  }
+  const table = document.createElement('table');
+  table.className = 'runs-table release-grid';
+  table.innerHTML = `<thead><tr>
+      <th>Release</th><th>Created</th>
+      ${rc.environments.map(e => `<th>${esc(e)}</th>`).join('')}
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+  for (const r of rows) {
+    const relLabel = r.runUrl
+      ? `<a href="${esc(r.runUrl)}" target="_blank" style="font-family:monospace;font-size:12px">${esc(r.ref || r.sha7)}</a>`
+      : `<span style="font-family:monospace;font-size:12px">${esc(r.ref || r.sha7)}</span>`;
+    const stageCells = rc.environments.map(env => {
+      const c = r.cells[env];
+      if (!c) return `<td><span class="stage-pill" title="Not deployed">${esc(env)}</span></td>`;
+      let pill;
+      if (c.kind === 'current') {
+        pill = `<span class="badge badge-success is-current" title="Currently deployed"><span class="status-dot dot-success"></span>${esc(env)}</span>`;
+      } else if (c.kind === 'prev') {
+        pill = `<span class="stage-pill pill-prev" title="Deployed earlier — superseded / rolled back">⟲ ${esc(env)}</span>`;
+      } else {
+        const sc = statusCls(c.kind || c.state);
+        pill = `<span class="badge badge-${sc}" title="${esc(statusLabel(c.state))}"><span class="status-dot dot-${sc}"></span>${esc(env)}</span>`;
+      }
+      const url = c.runUrl || r.runUrl;
+      return `<td>${url ? `<a href="${esc(url)}" target="_blank" style="text-decoration:none">${pill}</a>` : pill}</td>`;
+    }).join('');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${relLabel}<div style="font-size:11px;color:var(--text-muted);margin-top:2px"><code>${esc(r.sha7)}</code></div></td>
+      <td style="font-size:12px;color:var(--text-muted)" title="${esc(r.createdAt || '')}">${r.createdAt ? timeAgo(r.createdAt) : ''}</td>
+      ${stageCells}
+    `;
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  const legend = document.createElement('div');
+  legend.style.cssText = 'display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:11px;color:var(--text-muted);align-items:center';
+  legend.innerHTML = `
+    <span style="display:inline-flex;align-items:center;gap:5px"><span class="badge badge-success is-current" style="padding:1px 7px"><span class="status-dot dot-success"></span>env</span> currently deployed</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span class="stage-pill pill-prev" style="padding:1px 7px">⟲ env</span> previously deployed (rolled back / superseded)</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span class="stage-pill" style="padding:1px 7px">env</span> never deployed</span>
+  `;
+  container.innerHTML = '';
+  container.append(table, legend);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 async function fetchEnvStatuses(rc) {
   if (rc.demo) return rc._statuses;
   const { owner, repo, workflowId, envType, environments } = rc;
@@ -922,6 +1121,63 @@ async function fetchEnvStatuses(rc) {
     Object.assign(result, found);
   }
 
+  return result;
+}
+
+// Latest *successful* deployment per environment.
+async function fetchLatestSuccess(rc) {
+  const { owner, repo, envType, environments } = rc;
+
+  if (rc.demo) {
+    const hex = () => Math.floor(Math.random() * 16).toString(16);
+    const sha = () => Array.from({ length: 7 }, hex).join('');
+    const result = {};
+    for (const env of environments) {
+      const cur = rc._statuses[env];
+      if (cur && cur.status === 'success') { result[env] = cur; continue; }
+      // Synthesize an older successful release
+      result[env] = {
+        ...(cur || { env }),
+        env,
+        status: 'success',
+        sha: sha(),
+        createdAt: new Date(Date.now() - (Math.floor(Math.random() * 5000) + 4000) * 60000).toISOString(),
+      };
+    }
+    return result;
+  }
+
+  // Job-name mode already resolves to the last success per env.
+  if (envType !== 'github_environments') return fetchEnvStatuses(rc);
+
+  const result = {};
+  await Promise.all(environments.map(async envName => {
+    try {
+      const deployments = await GH.getDeployments(owner, repo, envName);
+      for (const dep of deployments) {
+        const statuses = await GH.getDeploymentStatuses(owner, repo, dep.id);
+        const s = statuses[0];
+        if (s?.state === 'success') {
+          const targetUrl = s.target_url || '';
+          const runIdMatch = targetUrl.match(/\/runs\/(\d+)/);
+          result[envName] = {
+            env: envName,
+            status: 'success',
+            sha: dep.sha?.slice(0, 7),
+            ref: dep.ref,
+            creator: dep.creator?.login,
+            createdAt: dep.updated_at || dep.created_at,
+            runUrl: targetUrl || dep.url,
+            runId: runIdMatch ? runIdMatch[1] : null,
+          };
+          return;
+        }
+      }
+      result[envName] = { env: envName, status: 'never' };
+    } catch {
+      result[envName] = { env: envName, status: 'unknown' };
+    }
+  }));
   return result;
 }
 
@@ -2121,13 +2377,32 @@ function renderDetail(rc) {
   // Current deployments panel
   const statusCard = document.createElement('div');
   statusCard.className = 'card';
-  statusCard.innerHTML = `<div class="card-label">Current Deployments</div>`;
+  statusCard.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <div class="card-label" style="margin:0">Current Deployments</div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);cursor:pointer;user-select:none">
+        <input type="checkbox" id="success-only-toggle" style="cursor:pointer">
+        Latest successful only
+      </label>
+    </div>
+  `;
   const envGrid = document.createElement('div');
   envGrid.id = 'detail-env-grid';
   envGrid.className = 'env-grid';
   putSkeletons(envGrid, environments.length);
   statusCard.append(envGrid);
   wrap.append(statusCard);
+
+  // Release pipeline grid (releases × stages)
+  const releaseCard = document.createElement('div');
+  releaseCard.className = 'card';
+  releaseCard.innerHTML = `<div class="card-label">Release pipeline</div>`;
+  const releaseGrid = document.createElement('div');
+  releaseGrid.id = 'release-grid';
+  releaseGrid.style.overflowX = 'auto';
+  releaseGrid.innerHTML = `<div style="color:var(--text-muted);font-size:13px;text-align:center;padding:20px">Loading…</div>`;
+  releaseCard.append(releaseGrid);
+  wrap.append(releaseCard);
 
   // Recent runs panel
   const runsCard = document.createElement('div');
@@ -2146,17 +2421,26 @@ async function loadDetail(rc) {
 
   // Env statuses
   const envGrid = document.getElementById('detail-env-grid');
-  if (envGrid) {
+  const successToggle = document.getElementById('success-only-toggle');
+  async function loadGrid(successOnly) {
+    if (!envGrid) return;
+    putSkeletons(envGrid, environments.length);
     try {
-      const statuses = await fetchEnvStatuses(rc);
+      const statuses = successOnly ? await fetchLatestSuccess(rc) : await fetchEnvStatuses(rc);
       envGrid.innerHTML = '';
       for (const envName of environments) {
         envGrid.append(renderEnvItem(statuses[envName] || { env: envName, status: 'never' }));
       }
     } catch (e) {
-      if (envGrid) envGrid.innerHTML = `<div style="color:var(--danger);font-size:13px">Error: ${esc(e.message)}</div>`;
+      envGrid.innerHTML = `<div style="color:var(--danger);font-size:13px">Error: ${esc(e.message)}</div>`;
     }
   }
+  if (successToggle) successToggle.addEventListener('change', () => loadGrid(successToggle.checked));
+  await loadGrid(false);
+
+  // Release pipeline grid
+  const releaseGrid = document.getElementById('release-grid');
+  if (releaseGrid) loadReleaseGrid(rc, releaseGrid);
 
   // Recent runs
   const runsList = document.getElementById('runs-list');
